@@ -1,0 +1,32 @@
+[package]
+name = "midi-mapper-debugger"
+version = "1.0.0"
+description = "MIDI 设备映射调试工具"
+authors = ["MIDI Mapper Team"]
+edition = "2021"
+rust-version = "1.70"
+
+[lib]
+name = "midi_mapper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.6", features = ["dialog-all", "fs-all", "path-all", "shell-open", "window-all"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+midir = "0.9.1"
+tokio = { version = "1.36", features = ["full"] }
+parking_lot = "0.12"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
