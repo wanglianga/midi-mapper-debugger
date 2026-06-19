@@ -138,6 +138,22 @@ export async function testDeviceConnection(deviceId: string): Promise<boolean> {
   return invoke<boolean>("test_device_connection", { deviceId });
 }
 
+export async function setMappingEnabled(mappingId: string, enabled: boolean): Promise<MidiMapping> {
+  return invoke<MidiMapping>("set_mapping_enabled", { mappingId, enabled });
+}
+
+export async function resolveConflict(
+  conflictId: string,
+  resolution: string,
+  targetMappingId?: string
+): Promise<void> {
+  return invoke("resolve_conflict", { conflictId, resolution, targetMappingId });
+}
+
+export async function checkConflicts(mapping: MidiMapping): Promise<DeviceConflict[]> {
+  return invoke<DeviceConflict[]>("check_conflicts", { mapping });
+}
+
 export interface EventHandlers {
   onMidiEvent?: (event: MidiEvent) => void;
   onDeviceConnected?: (deviceId: string) => void;
@@ -156,6 +172,8 @@ export interface EventHandlers {
   onPresetImported?: (preset: MappingPreset) => void;
   onLearningModeStarted?: () => void;
   onLearningModeStopped?: () => void;
+  onConflictsUpdated?: (conflicts: DeviceConflict[]) => void;
+  onMappingsUpdated?: (mappings: MidiMapping[]) => void;
 }
 
 export async function setupEventListeners(handlers: EventHandlers): Promise<() => void> {
@@ -227,6 +245,14 @@ export async function setupEventListeners(handlers: EventHandlers): Promise<() =
 
   if (handlers.onLearningModeStopped) {
     unlisteners.push(await listen<void>("learning_mode_stopped", () => handlers.onLearningModeStopped!()));
+  }
+
+  if (handlers.onConflictsUpdated) {
+    unlisteners.push(await listen<DeviceConflict[]>("conflicts_updated", (e) => handlers.onConflictsUpdated!(e.payload)));
+  }
+
+  if (handlers.onMappingsUpdated) {
+    unlisteners.push(await listen<MidiMapping[]>("mappings_updated", (e) => handlers.onMappingsUpdated!(e.payload)));
   }
 
   return () => {

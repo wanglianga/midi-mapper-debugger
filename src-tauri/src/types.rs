@@ -81,6 +81,7 @@ pub struct MidiMapping {
     pub note: Option<u8>,
     pub cc_number: Option<u8>,
     pub target: MappingTarget,
+    pub is_enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -95,14 +96,35 @@ pub struct MappingPreset {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictType {
+    DuplicateControl,
+    DuplicateTarget,
+    FeedbackLoop,
+    ChannelConflict,
+    DeviceConflict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictResolution {
+    Keep,
+    Replace,
+    Disable,
+    SaveAsPreset,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConflict {
     pub id: Uuid,
     pub timestamp: DateTime<Utc>,
     pub severity: ConflictSeverity,
+    pub conflict_type: ConflictType,
     pub message: String,
     pub involved_devices: Vec<String>,
     pub involved_mappings: Vec<Uuid>,
+    pub resolution_options: Vec<ConflictResolution>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -24,19 +24,16 @@ impl MappingManager {
 
     pub fn add_mapping(&self, mapping: MidiMapping) -> Result<MidiMapping, MidiError> {
         let conflicts = self.detect_conflicts(&mapping);
-        
-        if !conflicts.is_empty() {
-            for conflict in &conflicts {
-                if conflict.severity == ConflictSeverity::Error 
-                || conflict.severity == ConflictSeverity::Critical {
-                    return Err(MidiError::MappingConflict(conflict.message.clone()));
-                }
-            }
-        }
 
         let mut mappings = self.mappings.lock();
         mappings.push(mapping.clone());
-        self.add_conflicts(conflicts);
+        drop(mappings);
+        
+        if !conflicts.is_empty() {
+            self.add_conflicts(conflicts);
+        }
+        
+        self.recheck_all_conflicts();
         Ok(mapping)
     }
 
@@ -46,16 +43,10 @@ impl MappingManager {
             let mut updated = mapping.clone();
             updated.updated_at = Utc::now();
             
-            let conflicts = self.detect_conflicts(&updated);
-            for conflict in &conflicts {
-                if conflict.severity == ConflictSeverity::Error 
-                || conflict.severity == ConflictSeverity::Critical {
-                    return Err(MidiError::MappingConflict(conflict.message.clone()));
-                }
-            }
-            
             mappings[index] = updated.clone();
-            self.add_conflicts(conflicts);
+            drop(mappings);
+            
+            self.recheck_all_conflicts();
             Ok(updated)
         } else {
             Err(MidiError::DeviceNotFound(format!("映射 {} 不存在", mapping.id)))
@@ -81,9 +72,12 @@ impl MappingManager {
         self.mappings.lock().iter().find(|m| m.id == mapping_id).cloned()
     }
 
-    pub fn find_mapping_for_event(&self, event: &MidiEvent) -> Option<MidiMapping> {
+    pub fn find_mappings_for_event(&self, event: &MidiEvent) -> Vec<MidiMapping> {
         let mappings = self.mappings.lock();
-        mappings.iter().find(|m| {
+        mappings.iter().filter(|m| {
+            if !m.is_enabled {
+                return false;
+            }
             if m.device_id != event.device_id {
                 return false;
             }
@@ -106,7 +100,12 @@ impl MappingManager {
                 }
             }
             true
-        }).cloned()
+        }).cloned().collect()
+    }
+
+    pub fn find_mapping_for_event(&self, event: &MidiEvent) -> Option<MidiMapping> {
+        let mappings = self.find_mappings_for_event(event);
+        mappings.into_iter().next()
     }
 
     pub fn detect_conflicts(&self, new_mapping: &MidiMapping) -> Vec<DeviceConflict> {
@@ -118,46 +117,102 @@ impl MappingManager {
                 continue;
             }
 
-            let mut is_conflict = existing.device_id == new_mapping.device_id
+            let mut is_control_conflict = existing.device_id == new_mapping.device_id
                 && existing.event_type == new_mapping.event_type;
 
-            if is_conflict {
+            if is_control_conflict {
                 if let (Some(ch1), Some(ch2)) = (existing.channel, new_mapping.channel) {
-                    is_conflict = ch1 == ch2;
+                    is_control_conflict = ch1 == ch2;
                 }
             }
 
-            if is_conflict && matches!(new_mapping.event_type, MidiEventType::NoteOn | MidiEventType::NoteOff) {
+            if is_control_conflict && matches!(new_mapping.event_type, MidiEventType::NoteOn | MidiEventType::NoteOff | MidiEventType::Aftertouch) {
                 if let (Some(n1), Some(n2)) = (existing.note, new_mapping.note) {
-                    is_conflict = n1 == n2;
+                    is_control_conflict = n1 == n2;
                 }
             }
 
-            if is_conflict && matches!(new_mapping.event_type, MidiEventType::ControlChange) {
+            if is_control_conflict && matches!(new_mapping.event_type, MidiEventType::ControlChange) {
                 if let (Some(c1), Some(c2)) = (existing.cc_number, new_mapping.cc_number) {
-                    is_conflict = c1 == c2;
+                    is_control_conflict = c1 == c2;
                 }
             }
 
-            if is_conflict {
-                let (severity, message) = if existing.target.software == new_mapping.target.software
+            if is_control_conflict {
+                let (severity, message, conflict_type) = if existing.target.software == new_mapping.target.software
                     && existing.target.parameter_name == new_mapping.target.parameter_name {
                     (ConflictSeverity::Warning, 
                      format!("相同目标参数已被映射: {} -> {}", 
-                             existing.name, existing.target.parameter_name))
+                             existing.name, existing.target.parameter_name),
+                     ConflictType::DuplicateTarget)
                 } else {
                     (ConflictSeverity::Error,
-                     format!("MIDI 信号冲突: {} 与 {} 监听相同的输入信号",
-                             existing.name, new_mapping.name))
+                     format!("控件重复绑定: {} 与 {} 监听相同的输入信号，将同时触发多个参数",
+                             existing.name, new_mapping.name),
+                     ConflictType::DuplicateControl)
                 };
 
                 conflicts.push(DeviceConflict {
                     id: Uuid::new_v4(),
                     timestamp: Utc::now(),
                     severity,
+                    conflict_type,
                     message,
                     involved_devices: vec![new_mapping.device_id.clone()],
                     involved_mappings: vec![existing.id, new_mapping.id],
+                    resolution_options: vec![
+                        ConflictResolution::Keep,
+                        ConflictResolution::Replace,
+                        ConflictResolution::Disable,
+                        ConflictResolution::SaveAsPreset,
+                    ],
+                });
+            }
+
+            let is_target_conflict = existing.target.software == new_mapping.target.software
+                && existing.target.parameter_name == new_mapping.target.parameter_name
+                && !is_control_conflict;
+
+            if is_target_conflict {
+                conflicts.push(DeviceConflict {
+                    id: Uuid::new_v4(),
+                    timestamp: Utc::now(),
+                    severity: ConflictSeverity::Warning,
+                    conflict_type: ConflictType::DuplicateTarget,
+                    message: format!("目标参数被多个控件绑定: {} 与 {} 都会控制 '{}'",
+                            existing.name, new_mapping.name, new_mapping.target.parameter_name),
+                    involved_devices: vec![existing.device_id.clone(), new_mapping.device_id.clone()],
+                    involved_mappings: vec![existing.id, new_mapping.id],
+                    resolution_options: vec![
+                        ConflictResolution::Keep,
+                        ConflictResolution::Replace,
+                        ConflictResolution::Disable,
+                        ConflictResolution::SaveAsPreset,
+                    ],
+                });
+            }
+
+            let is_feedback_loop = existing.device_id == new_mapping.device_id
+                && existing.is_enabled
+                && new_mapping.is_enabled
+                && matches!(existing.event_type, MidiEventType::ControlChange | MidiEventType::NoteOn | MidiEventType::NoteOff)
+                && matches!(new_mapping.event_type, MidiEventType::ControlChange | MidiEventType::NoteOn | MidiEventType::NoteOff);
+
+            if is_feedback_loop && existing.target.parameter_name == new_mapping.target.parameter_name {
+                conflicts.push(DeviceConflict {
+                    id: Uuid::new_v4(),
+                    timestamp: Utc::now(),
+                    severity: ConflictSeverity::Critical,
+                    conflict_type: ConflictType::FeedbackLoop,
+                    message: format!("潜在回环风险: {} 和 {} 可能形成输入输出回环，导致信号震荡",
+                            existing.name, new_mapping.name),
+                    involved_devices: vec![new_mapping.device_id.clone()],
+                    involved_mappings: vec![existing.id, new_mapping.id],
+                    resolution_options: vec![
+                        ConflictResolution::Disable,
+                        ConflictResolution::Keep,
+                        ConflictResolution::SaveAsPreset,
+                    ],
                 });
             }
         }
@@ -174,52 +229,171 @@ impl MappingManager {
                 let m1 = &mappings[i];
                 let m2 = &mappings[j];
 
-                let mut is_conflict = m1.device_id == m2.device_id
+                let mut is_control_conflict = m1.device_id == m2.device_id
                     && m1.event_type == m2.event_type;
 
-                if is_conflict {
+                if is_control_conflict {
                     if let (Some(ch1), Some(ch2)) = (m1.channel, m2.channel) {
-                        is_conflict = ch1 == ch2;
+                        is_control_conflict = ch1 == ch2;
                     }
                 }
 
-                if is_conflict && matches!(m1.event_type, MidiEventType::NoteOn | MidiEventType::NoteOff) {
+                if is_control_conflict && matches!(m1.event_type, MidiEventType::NoteOn | MidiEventType::NoteOff | MidiEventType::Aftertouch) {
                     if let (Some(n1), Some(n2)) = (m1.note, m2.note) {
-                        is_conflict = n1 == n2;
+                        is_control_conflict = n1 == n2;
                     }
                 }
 
-                if is_conflict && matches!(m1.event_type, MidiEventType::ControlChange) {
+                if is_control_conflict && matches!(m1.event_type, MidiEventType::ControlChange) {
                     if let (Some(c1), Some(c2)) = (m1.cc_number, m2.cc_number) {
-                        is_conflict = c1 == c2;
+                        is_control_conflict = c1 == c2;
                     }
                 }
 
-                if is_conflict {
-                    let (severity, message) = if m1.target.software == m2.target.software
+                if is_control_conflict {
+                    let (severity, message, conflict_type) = if m1.target.software == m2.target.software
                         && m1.target.parameter_name == m2.target.parameter_name {
                         (ConflictSeverity::Warning, 
                          format!("相同目标参数已被映射: {} -> {}", 
-                                 m1.name, m1.target.parameter_name))
+                                 m1.name, m1.target.parameter_name),
+                         ConflictType::DuplicateTarget)
                     } else {
                         (ConflictSeverity::Error,
-                         format!("MIDI 信号冲突: {} 与 {} 监听相同的输入信号",
-                                 m1.name, m2.name))
+                         format!("控件重复绑定: {} 与 {} 监听相同的输入信号，将同时触发多个参数",
+                                 m1.name, m2.name),
+                         ConflictType::DuplicateControl)
                     };
 
                     all_conflicts.push(DeviceConflict {
                         id: Uuid::new_v4(),
                         timestamp: Utc::now(),
                         severity,
+                        conflict_type,
                         message,
                         involved_devices: vec![m1.device_id.clone()],
                         involved_mappings: vec![m1.id, m2.id],
+                        resolution_options: vec![
+                            ConflictResolution::Keep,
+                            ConflictResolution::Replace,
+                            ConflictResolution::Disable,
+                            ConflictResolution::SaveAsPreset,
+                        ],
+                    });
+                }
+
+                let is_target_conflict = m1.target.software == m2.target.software
+                    && m1.target.parameter_name == m2.target.parameter_name
+                    && !is_control_conflict;
+
+                if is_target_conflict {
+                    all_conflicts.push(DeviceConflict {
+                        id: Uuid::new_v4(),
+                        timestamp: Utc::now(),
+                        severity: ConflictSeverity::Warning,
+                        conflict_type: ConflictType::DuplicateTarget,
+                        message: format!("目标参数被多个控件绑定: {} 与 {} 都会控制 '{}'",
+                                m1.name, m2.name, m1.target.parameter_name),
+                        involved_devices: vec![m1.device_id.clone(), m2.device_id.clone()],
+                        involved_mappings: vec![m1.id, m2.id],
+                        resolution_options: vec![
+                            ConflictResolution::Keep,
+                            ConflictResolution::Replace,
+                            ConflictResolution::Disable,
+                            ConflictResolution::SaveAsPreset,
+                        ],
+                    });
+                }
+
+                let is_feedback_loop = m1.device_id == m2.device_id
+                    && m1.is_enabled
+                    && m2.is_enabled
+                    && matches!(m1.event_type, MidiEventType::ControlChange | MidiEventType::NoteOn | MidiEventType::NoteOff)
+                    && matches!(m2.event_type, MidiEventType::ControlChange | MidiEventType::NoteOn | MidiEventType::NoteOff);
+
+                if is_feedback_loop && m1.target.parameter_name == m2.target.parameter_name {
+                    all_conflicts.push(DeviceConflict {
+                        id: Uuid::new_v4(),
+                        timestamp: Utc::now(),
+                        severity: ConflictSeverity::Critical,
+                        conflict_type: ConflictType::FeedbackLoop,
+                        message: format!("潜在回环风险: {} 和 {} 可能形成输入输出回环，导致信号震荡",
+                                m1.name, m2.name),
+                        involved_devices: vec![m1.device_id.clone()],
+                        involved_mappings: vec![m1.id, m2.id],
+                        resolution_options: vec![
+                            ConflictResolution::Disable,
+                            ConflictResolution::Keep,
+                            ConflictResolution::SaveAsPreset,
+                        ],
                     });
                 }
             }
         }
 
         *self.conflicts.lock() = all_conflicts;
+    }
+
+    pub fn set_mapping_enabled(&self, mapping_id: Uuid, enabled: bool) -> Result<MidiMapping, MidiError> {
+        let mut mappings = self.mappings.lock();
+        if let Some(index) = mappings.iter().position(|m| m.id == mapping_id) {
+            let mut updated = mappings[index].clone();
+            updated.is_enabled = enabled;
+            updated.updated_at = Utc::now();
+            mappings[index] = updated.clone();
+            drop(mappings);
+            self.recheck_all_conflicts();
+            Ok(updated)
+        } else {
+            Err(MidiError::DeviceNotFound(format!("映射 {} 不存在", mapping_id)))
+        }
+    }
+
+    pub fn resolve_conflict(&self, conflict_id: Uuid, resolution: ConflictResolution, target_mapping_id: Option<Uuid>) -> Result<(), MidiError> {
+        let conflicts = self.conflicts.lock();
+        let conflict = conflicts.iter().find(|c| c.id == conflict_id)
+            .ok_or_else(|| MidiError::DeviceNotFound(format!("冲突 {} 不存在", conflict_id)))?;
+
+        let mapping_ids = conflict.involved_mappings.clone();
+        drop(conflicts);
+
+        match resolution {
+            ConflictResolution::Keep => {
+                let mut conflicts = self.conflicts.lock();
+                conflicts.retain(|c| c.id != conflict_id);
+            }
+            ConflictResolution::Replace => {
+                if let Some(keep_id) = target_mapping_id {
+                    let to_remove: Vec<Uuid> = mapping_ids.iter()
+                        .filter(|id| **id != keep_id)
+                        .cloned()
+                        .collect();
+                    
+                    let mut mappings = self.mappings.lock();
+                    mappings.retain(|m| !to_remove.contains(&m.id));
+                    drop(mappings);
+                    
+                    let mut conflicts = self.conflicts.lock();
+                    conflicts.retain(|c| c.id != conflict_id);
+                    drop(conflicts);
+                    
+                    self.recheck_all_conflicts();
+                }
+            }
+            ConflictResolution::Disable => {
+                if let Some(disable_id) = target_mapping_id {
+                    self.set_mapping_enabled(disable_id, false)?;
+                    
+                    let mut conflicts = self.conflicts.lock();
+                    conflicts.retain(|c| c.id != conflict_id);
+                }
+            }
+            ConflictResolution::SaveAsPreset => {
+                let mut conflicts = self.conflicts.lock();
+                conflicts.retain(|c| c.id != conflict_id);
+            }
+        }
+
+        Ok(())
     }
 
     fn add_conflicts(&self, conflicts: Vec<DeviceConflict>) {

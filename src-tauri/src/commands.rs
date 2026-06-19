@@ -362,3 +362,46 @@ pub async fn test_device_connection(
     
     Ok(device.is_connected && device.is_active)
 }
+
+#[tauri::command]
+pub async fn set_mapping_enabled(
+    mapping_id: Uuid,
+    enabled: bool,
+    state: State<'_, AppState>,
+    window: Window,
+) -> Result<MidiMapping, MidiError> {
+    let result = state.mapping_manager.set_mapping_enabled(mapping_id, enabled)?;
+    window.emit("mapping_updated", result.clone())?;
+    
+    let fm = state.file_manager.lock().await;
+    fm.save_mappings(&state.mapping_manager.get_mappings())?;
+    
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn resolve_conflict(
+    conflict_id: Uuid,
+    resolution: ConflictResolution,
+    target_mapping_id: Option<Uuid>,
+    state: State<'_, AppState>,
+    window: Window,
+) -> Result<(), MidiError> {
+    state.mapping_manager.resolve_conflict(conflict_id, resolution, target_mapping_id)?;
+    
+    let fm = state.file_manager.lock().await;
+    fm.save_mappings(&state.mapping_manager.get_mappings())?;
+    
+    window.emit("conflicts_updated", state.mapping_manager.get_conflicts())?;
+    window.emit("mappings_updated", state.mapping_manager.get_mappings())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn check_conflicts(
+    mapping: MidiMapping,
+    state: State<'_, AppState>,
+) -> Result<Vec<DeviceConflict>, MidiError> {
+    Ok(state.mapping_manager.detect_conflicts(&mapping))
+}

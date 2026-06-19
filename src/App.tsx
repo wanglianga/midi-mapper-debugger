@@ -7,6 +7,7 @@ import {
   DeviceConflict,
   AppConfig,
   MidiEventType,
+  HighlightedControl,
 } from "./types";
 import {
   scanDevices,
@@ -48,9 +49,11 @@ function App() {
     cc_number: number | null;
   } | null>(null);
   const [activeTab, setActiveTab] = useState<"visualizer" | "mappings">("visualizer");
+  const [highlightedControl, setHighlightedControl] = useState<HighlightedControl | null>(null);
 
   const eventTimestamps = useRef<number[]>([]);
   const initialized = useRef(false);
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -148,6 +151,18 @@ function App() {
     return recent.length;
   }, []);
 
+  const handleControlHighlight = useCallback((control: HighlightedControl) => {
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+    
+    setHighlightedControl(control);
+    
+    highlightTimeoutRef.current = setTimeout(() => {
+      setHighlightedControl(null);
+    }, 1000);
+  }, []);
+
   useEffect(() => {
     if (!initialized.current) {
       initialized.current = true;
@@ -189,6 +204,13 @@ function App() {
           onPresetLoaded: () => refreshMappings(),
           onPresetDeleted: () => refreshMappings(),
           onPresetImported: () => refreshMappings(),
+          onConflictsUpdated: (newConflicts) => {
+            setConflicts(newConflicts);
+          },
+          onMappingsUpdated: (newMappings) => {
+            setMappings(newMappings);
+            refreshMappings();
+          },
         });
 
         return cleanup;
@@ -196,6 +218,12 @@ function App() {
 
       setupListeners();
     }
+
+    return () => {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+      }
+    };
   }, [loadInitialData, handleScan, refreshMappings, learningMode]);
 
   useEffect(() => {
@@ -218,6 +246,13 @@ function App() {
     total: events.length,
     rate: calculateEventRate(),
   };
+
+  const mappingDataForVisualizer = mappings.map((m) => ({
+    id: m.id,
+    name: m.name,
+    cc_number: m.cc_number,
+    note: m.note,
+  }));
 
   return (
     <div className="h-screen flex flex-col bg-midi-dark">
@@ -263,7 +298,7 @@ function App() {
               }`}
               onClick={() => setActiveTab("mappings")}
             >
-              🔗 映射表 ({mappings.length})
+              🔗 映射表 ({mappings.filter(m => m.is_enabled).length}/{mappings.length})
             </button>
           </div>
 
@@ -274,11 +309,22 @@ function App() {
                   <Visualizer
                     events={events}
                     devices={allDevices.filter((d) => d.is_connected).map((d) => d.id)}
+                    highlightedControl={highlightedControl}
+                    mappings={mappingDataForVisualizer}
                   />
-                  <EventLog events={events} maxEvents={config?.max_events_logged || 500} />
+                  <EventLog
+                    events={events}
+                    maxEvents={config?.max_events_logged || 500}
+                    onControlHighlight={handleControlHighlight}
+                  />
                 </div>
                 <div className="px-4 pb-4">
-                  <ConflictAlerts conflicts={conflicts} onClear={refreshConflicts} />
+                  <ConflictAlerts
+                    conflicts={conflicts}
+                    mappings={mappings}
+                    onClear={refreshConflicts}
+                    onResolve={refreshMappings}
+                  />
                 </div>
               </div>
             ) : (

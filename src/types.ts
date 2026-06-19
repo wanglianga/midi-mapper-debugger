@@ -68,6 +68,7 @@ export interface MidiMapping {
   note: number | null;
   cc_number: number | null;
   target: MappingTarget;
+  is_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -81,13 +82,34 @@ export interface MappingPreset {
   updated_at: string;
 }
 
+export type ConflictType =
+  | "duplicate_control"
+  | "duplicate_target"
+  | "feedback_loop"
+  | "channel_conflict"
+  | "device_conflict";
+
+export type ConflictResolution = "keep" | "replace" | "disable" | "save_as_preset";
+
+export interface HighlightedControl {
+  device_id: string;
+  event_type: MidiEventType;
+  channel: number;
+  note?: number | null;
+  cc_number?: number | null;
+  value?: number | null;
+  timestamp: number;
+}
+
 export interface DeviceConflict {
   id: string;
   timestamp: string;
   severity: ConflictSeverity;
+  conflict_type: ConflictType;
   message: string;
   involved_devices: string[];
   involved_mappings: string[];
+  resolution_options: ConflictResolution[];
 }
 
 export interface AppConfig {

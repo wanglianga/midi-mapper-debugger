@@ -8,7 +8,7 @@ import {
   getEventTypeLabel,
   formatTimestamp,
 } from "../types";
-import { addMapping, updateMapping, deleteMapping } from "../api";
+import { addMapping, updateMapping, deleteMapping, setMappingEnabled } from "../api";
 
 interface MappingTableProps {
   mappings: MidiMapping[];
@@ -36,6 +36,7 @@ export const MappingTable: React.FC<MappingTableProps> = ({
   const [showModal, setShowModal] = useState(false);
   const [editingMapping, setEditingMapping] = useState<MidiMapping | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     name: "",
     description: "",
@@ -118,6 +119,7 @@ export const MappingTable: React.FC<MappingTableProps> = ({
           max_value: formData.target_max,
           current_value: null,
         },
+        is_enabled: true,
       };
 
       if (editingMapping) {
@@ -146,6 +148,18 @@ export const MappingTable: React.FC<MappingTableProps> = ({
       } catch (e) {
         console.error("删除映射失败:", e);
       }
+    }
+  };
+
+  const handleToggleEnabled = async (mapping: MidiMapping) => {
+    setTogglingId(mapping.id);
+    try {
+      await setMappingEnabled(mapping.id, !mapping.is_enabled);
+      onMappingChange?.();
+    } catch (e) {
+      console.error("切换映射状态失败:", e);
+    } finally {
+      setTogglingId(null);
     }
   };
 
@@ -180,12 +194,16 @@ export const MappingTable: React.FC<MappingTableProps> = ({
 
   const inputDevices = devices.filter((d) => d.is_input);
 
+  const enabledCount = mappings.filter((m) => m.is_enabled).length;
+
   return (
     <div className="panel h-full flex flex-col">
       <div className="panel-header">
         <h2 className="panel-title">
           映射表
-          <span className="ml-2 text-xs text-gray-500">({mappings.length})</span>
+          <span className="ml-2 text-xs text-gray-500">
+            ({enabledCount}/{mappings.length} 启用)
+          </span>
         </h2>
         <div className="flex gap-2">
           {learningMode && (
@@ -206,7 +224,7 @@ export const MappingTable: React.FC<MappingTableProps> = ({
       {learningMode && learningEvent && (
         <div className="px-4 py-2 bg-green-500/20 border-b border-green-500/50 flex items-center justify-between">
           <div className="text-sm text-green-400">
-            ✨ 已捕获 MIDI 信号: {formatMappingSource({ ...learningEvent, id: "", name: "", description: "", device_id: learningEvent.device_id, target: { parameter_name: "", software: "", min_value: 0, max_value: 0, current_value: null }, created_at: "", updated_at: "" })}
+            ✨ 已捕获 MIDI 信号: {formatMappingSource({ ...learningEvent, id: "", name: "", description: "", device_id: learningEvent.device_id, target: { parameter_name: "", software: "", min_value: 0, max_value: 0, current_value: null }, is_enabled: true, created_at: "", updated_at: "" })}
           </div>
           <button className="btn-ghost text-xs" onClick={onClearLearning}>
             清除
@@ -235,6 +253,7 @@ export const MappingTable: React.FC<MappingTableProps> = ({
           <table className="w-full text-sm">
             <thead className="bg-midi-dark/50 sticky top-0">
               <tr>
+                <th className="table-header w-8">状态</th>
                 <th className="table-header">名称</th>
                 <th className="table-header">设备</th>
                 <th className="table-header">信号源</th>
@@ -247,7 +266,24 @@ export const MappingTable: React.FC<MappingTableProps> = ({
             </thead>
             <tbody>
               {mappings.map((mapping) => (
-                <tr key={mapping.id} className="table-row">
+                <tr
+                  key={mapping.id}
+                  className={`table-row ${!mapping.is_enabled ? "opacity-50" : ""}`}
+                >
+                  <td className="table-cell">
+                    <button
+                      className={`w-6 h-6 rounded flex items-center justify-center transition-colors ${
+                        mapping.is_enabled
+                          ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                          : "bg-gray-500/20 text-gray-500 hover:bg-gray-500/30"
+                      } ${togglingId === mapping.id ? "animate-pulse" : ""}`}
+                      onClick={() => handleToggleEnabled(mapping)}
+                      title={mapping.is_enabled ? "点击禁用" : "点击启用"}
+                      disabled={togglingId === mapping.id}
+                    >
+                      {mapping.is_enabled ? "✓" : "✕"}
+                    </button>
+                  </td>
                   <td className="table-cell font-medium">{mapping.name}</td>
                   <td className="table-cell text-gray-400">{getDeviceName(mapping.device_id)}</td>
                   <td className={`table-cell ${getEventTypeColor(mapping.event_type)}`}>
